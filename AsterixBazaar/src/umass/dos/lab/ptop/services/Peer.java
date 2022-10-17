@@ -4,7 +4,9 @@ import java.rmi.AccessException;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.Registry;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Stack;
@@ -14,28 +16,32 @@ public class Peer implements Gaul {
 	private final String myId;	//Unique ID assigned to this peer
 	private String[] items = {"fish", "salt", "boars"};	// possible items to buy and sell
 	private int maxItemsToSell;	// max number of units the seller begins to sell
-	private int itemsLeft;
+	private int itemsLeft;		//TODO: MAKE THIS SYNCHRONIZED
 	private int maxNeighbors;	// maximum number of neighbors for direct communication in client mode
 	private ArrayList<String> neighbors;	//list of neighbors
 	private int itemSelling;
 	private Registry registry;
-	private HashSet<Long> transactionsStarted;
+	private HashSet<Long> transactionsStarted;	//TODO : MAKE THIS SYNCHRONIZED
 	
 	
 	public Peer(String id, int maxNeighbors, int maxItemsToSell, Registry registry) {
 		this.myId = id;
 		this.maxNeighbors = maxNeighbors;
 		this.maxItemsToSell = maxItemsToSell;
+		this.neighbors = new ArrayList<String>();
 		
 		// initializing the seller mode with randomly selected item
 		int itemSelling = selectItemAtRandom();
 		this.itemSelling = itemSelling;
 		this.itemsLeft = this.maxItemsToSell;	// initializing number of items available to max
+		System.out.println(myId + " selling " + this.items[this.itemSelling] + " Nos left: " + this.itemsLeft);
 		
 		// initializing the registry;
 		this.registry = registry;
 		
 		this.transactionsStarted = new HashSet<Long>();
+		
+		
 	}
 	
 	
@@ -46,7 +52,8 @@ public class Peer implements Gaul {
 		return;
 	}
 	
-	public void addNeighbor(String neighbour) {
+	@Override
+	public void addNeighbor(String neighbour) throws RemoteException {
 		if(this.neighbors.size() >= maxNeighbors)
 			return;
 		this.neighbors.add(neighbour);
@@ -55,9 +62,14 @@ public class Peer implements Gaul {
 	
 	private int selectItemAtRandom() {
 		Random random = new Random();
-		int randomIndex = random.nextInt(1000);
-		randomIndex = randomIndex % 3;
+		int randomIndex = random.nextInt(3);
 		return randomIndex;
+	}
+	
+	private String getCurrentTimeStamp() {
+		SimpleDateFormat formatter = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");  
+	    Date date = new Date();
+	    return formatter.format(date);
 	}
 	
 	/*
@@ -70,12 +82,12 @@ public class Peer implements Gaul {
 	// TODO: return int if we need to track global hops  -- NOT SURE
 	
 	@Override
-	public void lookup(long transactionId, String buyerId, String productName, int hopsLeft, Stack<String> searchPath) {
+	public void lookup(long transactionId, String buyerId, String productName, int hopsLeft, Stack<String> searchPath) throws RemoteException{
 		String sellingItemName = this.items[this.itemSelling];
 		try {
 			if(this.itemsLeft > 0 && productName.equals(sellingItemName)) {
 				//TODO: STOP FLOODING AND CAPTURE THE SEARCHPATH AND CALL REPLY METHOD
-				Peer buyerPeer = (Peer) registry.lookup(searchPath.pop());
+				Gaul buyerPeer = (Gaul) registry.lookup(searchPath.pop());
 				buyerPeer.reply(transactionId, myId, searchPath, productName); // tracing back through search path till the buyer
 			}
 			else {
@@ -83,7 +95,7 @@ public class Peer implements Gaul {
 					searchPath.push(this.myId); // adding to the path
 					//TODO: FLOOD TO NEIGHBORS
 					for(String friend : neighbors) {
-						Peer friendPeer = (Peer) registry.lookup(friend);
+						Gaul friendPeer = (Gaul) registry.lookup(friend);
 						friendPeer.lookup(transactionId, buyerId, productName, hopsLeft - 1, searchPath);
 					}
 				}
@@ -97,10 +109,14 @@ public class Peer implements Gaul {
 	}
 	
 	@Override
-	public boolean buy(long transactionId, String buyerId, String itemNeeded) {
+	public boolean buy(long transactionId, String buyerId, String itemNeeded) throws RemoteException {
 		String sellingItemName = this.items[this.itemSelling];
 		if(this.itemsLeft > 0 && sellingItemName.equals(sellingItemName)) {
 			this.itemsLeft = this.itemsLeft - 1; // decrement number of items available. SHOULD BE THREAD SAFE
+			System.out.println(myId + " sold 1 unit of  " + this.items[this.itemSelling] + " Nos left: " + this.itemsLeft);
+			
+			
+			this.transactionsStarted.remove(transactionId);	// this marks that the transaction is complete
 			
 			//TODO: PRINT IN REQUIRED FORMAT
 			if(this.itemsLeft <= 0) {	// pick another item to sell at random.
@@ -108,7 +124,7 @@ public class Peer implements Gaul {
 				this.itemSelling = itemToPick;
 				this.itemsLeft = this.maxItemsToSell;
 			}
-			
+			System.out.println(myId + " selling " + this.items[this.itemSelling] + " Nos left: " + this.itemsLeft);
 			return true;
 		}
 		
@@ -124,7 +140,7 @@ public class Peer implements Gaul {
 	 */
 	
 	@Override
-	public void reply(long transactionId, String sellerId, Stack<String> path, String productRequested) {
+	public void reply(long transactionId, String sellerId, Stack<String> path, String productRequested) throws RemoteException {
 		
 		//TODO: CHECK IF THAT REQUEST IS ALREADY SERVED BY OTHER SERVER
 		// WE MAY NEED TO TAKE A UNIQUE TRANSACTION ID TO ACHIEVE THIS
@@ -134,14 +150,20 @@ public class Peer implements Gaul {
 					//TODO: THIS IS THE CLIENT THAT REQUESTED FOR AN ITEM. 
 					// NOW CALL BUY METHOD OF THE SELLERID, 
 					//THIS WILL BE THE LAST STEP IN THE TRANSACTION
+					if(!this.transactionsStarted.contains(transactionId))
+						return;	//other seller served this request already
 					
-					Peer seller = (Peer) registry.lookup(sellerId);
-					seller.buy(transactionId, myId, productRequested);
+					Gaul seller = (Gaul) registry.lookup(sellerId);
+					if(seller.buy(transactionId, myId, productRequested)) {
+						
+						 
+						System.out.println(getCurrentTimeStamp() + " :  bought " + productRequested + " from " + sellerId);
+					}
 					// TODO: MAKE BUY RETURN BOOLEAN AND IF TRUE PRINT SUCCESSFUL BUYING
 	
 				}
 				else {
-					Peer nextPeer = (Peer) registry.lookup(nextPeerToCall);
+					Gaul nextPeer = (Gaul) registry.lookup(nextPeerToCall);
 					
 					nextPeer.reply(transactionId, sellerId, path, productRequested);
 				}
@@ -153,9 +175,12 @@ public class Peer implements Gaul {
 		}
 	}
 	
-	private void startClient() {
+	@Override
+	public void startClientMode() throws RemoteException{
 		Thread client = new Thread(new ClientRunnable());
 		client.start();
+		System.out.println("Initialized " + myId + " in client mode");
+
 	}
 	
 	class ClientRunnable implements Runnable{
@@ -172,10 +197,10 @@ public class Peer implements Gaul {
 				}
 				String productToBuy = items[selectItemAtRandom()];
 				int maxHops = 4; // TODO: REMOVE THE HARDCODING
-				Peer friendPeer = null;
+				Gaul friendPeer = null;
 				for(String friend : neighbors) {
 					try {
-						friendPeer = (Peer) registry.lookup(friend);
+						friendPeer = (Gaul) registry.lookup(friend);
 					} catch (Exception e) {
 						// TODO Auto-generated catch block
 						e.printStackTrace();
@@ -183,7 +208,15 @@ public class Peer implements Gaul {
 					}
 					Stack<String> path = new Stack<String>();
 					path.push(myId); // storing the path
-					friendPeer.lookup(System.currentTimeMillis(), myId, productToBuy, maxHops, path);
+					System.out.println(myId + " looking up for " + productToBuy + " with neighbour " + friend);
+					long transactionId = System.currentTimeMillis();
+					transactionsStarted.add(transactionId);
+					try {
+						friendPeer.lookup(transactionId, myId, productToBuy, maxHops, path);
+					} catch (RemoteException e) {
+						// TODO Auto-generated catch block
+						e.printStackTrace();
+					}
 					
 				}
 			
