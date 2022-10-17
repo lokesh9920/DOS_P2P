@@ -11,5 +11,7 @@ public class AsterixBazaarApplication {
 		//Creates a Central registry used by all servers/clients to register/lookup stubs
 		Registry registry = LocateRegistry.createRegistry(1099);
 		
+		//TODO: create peers and their stubs and map it in the registry.
+		
 	}
 }
