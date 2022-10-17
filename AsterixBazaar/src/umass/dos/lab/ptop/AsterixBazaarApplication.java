@@ -17,8 +17,8 @@ public class AsterixBazaarApplication {
 		Registry registry = LocateRegistry.createRegistry(1099);
 		
 		//TODO: create peers and their stubs and map it in the registry.
-		Gaul peer1 = new Peer("Peer_1", 1, 5, registry);
-		Gaul peer2 = new Peer("Peer_2", 1, 5, registry);
+		Gaul peer1 = new Peer("Peer_1", 1, 5, 50, registry);
+		Gaul peer2 = new Peer("Peer_2", 1, 5, 50, registry);
 		
 		peer1.addNeighbor("Peer_2");
 		peer2.addNeighbor("Peer_1");
