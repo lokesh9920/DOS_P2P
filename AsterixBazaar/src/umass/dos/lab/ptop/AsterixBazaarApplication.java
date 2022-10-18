@@ -43,17 +43,22 @@ public class AsterixBazaarApplication {
 		BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
 		System.out.print("Enter number of peers: ");
 		int numPeers = Integer.parseInt(br.readLine());
+		System.out.print("Enter maximum number of neighbors allowed: ");
+		int maxNeighbors = Integer.parseInt(br.readLine());
+		System.out.print("Enter maximum number of units per item to available to sell: ");
+		int maxUnits = Integer.parseInt(br.readLine());
+		int maxServerThreads = 50;
 		
 		Gaul[] peers = new Gaul[numPeers + 1];
 		Gaul[] stubs = new Gaul[numPeers + 1];
 		
 		for(int i = 1; i <= numPeers; i++) {
-			Gaul currentPeer = new Peer("Peer_" + i, 3, 10, 50, registry);
+			Gaul currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry);
 			peers[i] = currentPeer;
 		}
 		//TODO: LOGIC TO CREATE NEIGHBORS
 		List<List<Integer>> adj = new ArrayList();
-		createLinks(adj, numPeers, 3);
+		createLinks(adj, numPeers, maxNeighbors);
 		System.out.println(adj);
 		for(int i = 1; i <= numPeers; i++) {
 			
@@ -96,16 +101,24 @@ public class AsterixBazaarApplication {
 			int moreRequired = maxFriends - adj.get(i).size();
 			for(int j = 0 ; j < moreRequired; j++) {
 				int count = 0;
-				int randomValue = -1;
+				Integer randomValue = -1;
 				while(count < numPeers) {
 					count++;
 					randomValue = random.nextInt(numPeers);
-					if(randomValue == i || adj.get(randomValue).size() >= maxFriends)
+					if(randomValue == i || adj.get(randomValue).size() >= maxFriends || adj.get(i).size() >= maxFriends)
+					{
+						randomValue = -1;
 						continue;
+					}
 					if(adj.get(i).contains(randomValue))
+					{
+						randomValue = -1;
 						continue;
-					if(adj.get(randomValue).contains(i))
+					}
+					if(adj.get(randomValue).contains(i)) {
+						randomValue = -1;
 						continue;
+					}					
 					break;
 				}
 				if(randomValue == -1)
