@@ -249,7 +249,8 @@ public class Peer implements Gaul {
 		return;
 	}
 	
-	public void setNeighbors(ArrayList<String> neighbors) {
+	@Override
+	public void setNeighbors(ArrayList<String> neighbors) throws RemoteException {
 		if(neighbors.size() > maxNeighbors)
 			return;
 		this.neighbors = neighbors;
