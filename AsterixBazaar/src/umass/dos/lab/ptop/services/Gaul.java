@@ -14,4 +14,6 @@ public interface Gaul extends Remote {
 	void lookup(long transactionId, String buyerId, String productName, int hopsLeft, Stack<String> searchPath,
 			HashSet<String> searchedPeers) throws RemoteException;
 	void setNeighbors(ArrayList<String> neighbors) throws RemoteException;
+	
+	public void printMetaData() throws RemoteException;
 }

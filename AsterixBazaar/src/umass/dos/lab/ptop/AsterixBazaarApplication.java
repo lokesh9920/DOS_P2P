@@ -24,21 +24,6 @@ public class AsterixBazaarApplication {
 		//Creates a Central registry used by all servers/clients to register/lookup stubs
 		Registry registry = LocateRegistry.createRegistry(1099);
 		
-		//TODO: create peers and their stubs and map it in the registry.
-//		Gaul peer1 = new Peer("Peer_1", 1, 5, 50, registry);
-//		Gaul peer2 = new Peer("Peer_2", 1, 5, 50, registry);
-//		
-//		peer1.addNeighbor("Peer_2");
-//		peer2.addNeighbor("Peer_1");
-//		
-//		Gaul peer1Stub = (Gaul) UnicastRemoteObject.exportObject(peer1, 0);
-//		Gaul peer2Stub = (Gaul) UnicastRemoteObject.exportObject(peer2, 0);
-//		
-//		registry.rebind("Peer_1", peer1Stub);
-//		registry.rebind("Peer_2", peer2Stub);
-//		
-//		peer1.startClientMode();
-//		peer2.startClientMode();
 		
 		BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
 		System.out.print("Enter number of peers: ");
@@ -53,13 +38,17 @@ public class AsterixBazaarApplication {
 		Gaul[] stubs = new Gaul[numPeers + 1];
 		
 		for(int i = 1; i <= numPeers; i++) {
-			Gaul currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry);
+			Gaul currentPeer;
+			if(i == 1)
+				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, true, numPeers/2 + 1);
+			else
+				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, false, numPeers/2 + 1);
 			peers[i] = currentPeer;
 		}
 		//TODO: LOGIC TO CREATE NEIGHBORS
 		List<List<Integer>> adj = new ArrayList();
 		createLinks(adj, numPeers, maxNeighbors);
-		System.out.println(adj);
+//		System.out.println(adj);
 		for(int i = 1; i <= numPeers; i++) {
 			
 			List<Integer> friends = adj.get(i-1);
@@ -68,6 +57,11 @@ public class AsterixBazaarApplication {
 			}
 		}
 		
+		System.out.println();
+		System.out.println("Printing Peers MetaData");
+		for(int i = 1; i <= numPeers; i++) {
+			peers[i].printMetaData();
+		}
 		// create stubs and bind to the registry
 		for(int i = 1; i <= numPeers; i++) {
 			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(peers[i], 0);
