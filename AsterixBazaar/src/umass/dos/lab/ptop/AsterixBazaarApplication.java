@@ -1,6 +1,7 @@
 package umass.dos.lab.ptop;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -34,15 +35,21 @@ public class AsterixBazaarApplication {
 		int maxUnits = Integer.parseInt(br.readLine());
 		int maxServerThreads = 50;
 		
+		File sharedFile = new File("BuyersData.txt");
+		if(sharedFile.createNewFile()) {
+			System.out.println("new file created");
+		}
+		String filePath = sharedFile.getAbsolutePath();
+		
 		Gaul[] peers = new Gaul[numPeers + 1];
 		Gaul[] stubs = new Gaul[numPeers + 1];
 		
 		for(int i = 1; i <= numPeers; i++) {
 			Gaul currentPeer;
 			if(i == 1)
-				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, true, numPeers/2 + 1);
+				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, true, numPeers/2 + 1, numPeers, filePath);
 			else
-				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, false, numPeers/2 + 1);
+				currentPeer = new Peer("Peer_" + i, maxNeighbors, maxUnits, maxServerThreads, registry, false, numPeers/2 + 1, numPeers, filePath);
 			peers[i] = currentPeer;
 		}
 		//TODO: LOGIC TO CREATE NEIGHBORS
@@ -70,9 +77,11 @@ public class AsterixBazaarApplication {
 		}
 		
 		// start each peer in client mode
-		
+		peers[numPeers].inititlizeLeader();
+
 		for(int i = 1; i <= numPeers; i++) {
 			peers[i].startClientMode();
+			peers[i].startTraderMode();
 		}
 		
 	}
