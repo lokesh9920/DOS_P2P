@@ -6,6 +6,7 @@ public class BuyTask {
 	
 	public String itemName;
 	public String buyerId;
-	ArrayList<Integer> vectorClock;
+	public ArrayList<Integer> vectorClock;
+	public long transactionId;
 
 }
