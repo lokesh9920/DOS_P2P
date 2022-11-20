@@ -37,6 +37,7 @@ public class AsterixBazaarApplication {
 		Gaul[] peers = new Gaul[numPeers + 1];
 		Gaul[] stubs = new Gaul[numPeers + 1];
 		
+		//create peers
 		for(int i = 1; i <= numPeers; i++) {
 			Gaul currentPeer;
 			if(i == 1)
@@ -48,6 +49,7 @@ public class AsterixBazaarApplication {
 		
 		
 		System.out.println();
+		//create and bind stubs to registry
 		for(int i = 1; i <= numPeers; i++) {
 			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(peers[i], 0);
 			stubs[i] = currentStub;
