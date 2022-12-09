@@ -8,6 +8,7 @@ import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
 
+import umass.dos.lab.ptop.services.DBServer;
 import umass.dos.lab.ptop.services.Gaul;
 import umass.dos.lab.ptop.services.Peer;
 
@@ -21,49 +22,63 @@ public class AsterixBazaarApplication {
 		
 		
 		BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
-		System.out.print("Enter number of peers: ");
-		int numPeers = Integer.parseInt(br.readLine());
+		System.out.print("Enter number of Buyers: ");
+		int numBuyers = Integer.parseInt(br.readLine());
 		
-		System.out.print("Enter maximum number of units per item to available to sell: ");
-		int maxUnits = Integer.parseInt(br.readLine());
+		System.out.print("Enter number of Sellers: ");
+		int numSellers = Integer.parseInt(br.readLine());
+		
+		System.out.print("Enter number of Traders: ");
+		int numTraders = Integer.parseInt(br.readLine());
+		
 		int maxServerThreads = 50;
 		
-		File sharedFile = new File("BuyersData.txt");
-		if(sharedFile.createNewFile()) {
-			System.out.println("New shared file created with name BuyersData.txt");
-		}
-		String filePath = sharedFile.getAbsolutePath();
+		DBServer dbServer = new DBServer();
 		
-		Gaul[] peers = new Gaul[numPeers + 1];
-		Gaul[] stubs = new Gaul[numPeers + 1];
+		Gaul[] buyers = new Gaul[numBuyers + 1];
+		Gaul[] sellers = new Gaul[numSellers + 1];
+		Gaul[] traders = new Gaul[numTraders + 1];
 		
-		//create peers
-		for(int i = 1; i <= numPeers; i++) {
+		//create Buyers
+		for(int i = 1; i <= numBuyers; i++) {
 			Gaul currentPeer;
-			if(i == 1)
-				currentPeer = new Peer("Peer_" + i, maxUnits, maxServerThreads, registry, true, numPeers/2 + 1, numPeers, filePath);
-			else
-				currentPeer = new Peer("Peer_" + i, maxUnits, maxServerThreads, registry, false, numPeers/2 + 1, numPeers, filePath);
-			peers[i] = currentPeer;
+			currentPeer = new Peer("Buyer_" + i, maxServerThreads, registry, 0, dbServer, numBuyers, numSellers, numTraders);
+			buyers[i] = currentPeer;
+			
+			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(buyers[i], 0);
+			registry.rebind("Buyer_" + i, currentStub);
+		}
+		//create Sellers
+		for(int i = 1; i <= numSellers; i++) {
+			Gaul currentPeer;
+			currentPeer = new Peer("Seller_" + i, maxServerThreads, registry, 1, dbServer, numBuyers, numSellers, numTraders);
+			sellers[i] = currentPeer;
+			
+			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(sellers[i], 0);
+			registry.rebind("Seller_" + i, currentStub);
+		}
+		//create traders
+		for(int i = 1; i <= numTraders; i++) {
+			Gaul currentPeer;
+			currentPeer = new Peer("Trader_" + i, maxServerThreads, registry, 2, dbServer, numBuyers, numSellers, numTraders);
+			traders[i] = currentPeer;
+			
+			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(traders[i], 0);
+			registry.rebind("Trader_" + i, currentStub);
 		}
 		
 		
-		System.out.println();
-		//create and bind stubs to registry
-		for(int i = 1; i <= numPeers; i++) {
-			Gaul currentStub = (Gaul) UnicastRemoteObject.exportObject(peers[i], 0);
-			stubs[i] = currentStub;
-			registry.rebind("Peer_" + i, stubs[i]);
+		for(int i = 1; i <= numTraders; i++) {
+			traders[i].startTraderMode();
 		}
-		
-		// start each peer in client mode
-		peers[numPeers].inititlizeLeader();
 
-		for(int i = 1; i <= numPeers; i++) {
-			peers[i].startClientMode();
-			peers[i].startTraderMode();
+		for(int i = 1; i <= numSellers; i++) {
+			sellers[i].startSellerMode();
 		}
-		
+		for(int i = 1; i <= numBuyers; i++) {
+			buyers[i].startClientMode();
+		}
+				
 	}
 	
 	
