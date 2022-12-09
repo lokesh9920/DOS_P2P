@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.rmi.AccessException;
+import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.Registry;
 import java.text.SimpleDateFormat;
@@ -15,6 +17,9 @@ import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,13 +27,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class Peer implements Gaul {
 
 	private final String myId;	//Unique ID assigned to this peer
-	private String[] items = {"FISH", "SALT", "BOARS", "BUYER"};	// possible items to buy and sell and Buyer mode to pick randomly from.
+	private String[] items = {"FISH", "SALT", "BOARS"};	// possible items to buy and sell and Buyer mode to pick randomly from.
 	private int maxItemsToSell;	// max number of units the seller begins to sell
 	private int itemsLeft;		// number of items left with seller to sell
 	private int itemSelling;
 	private Registry registry;
 	private ExecutorService serverThreadPool;
-	private boolean isBuyer;
+	private int mode;
 	private Random random = new Random();
 	private int maxHops;
 
@@ -36,76 +41,74 @@ public class Peer implements Gaul {
 	private boolean amITheLeader;
 	private String leaderId;
 	private int totalPeers;
-	private Thread leaderCheckThread = null;
-	private String filePath;
+	private DBServer dbServer = null;
 	private HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
 	private ObjectMapper mapper = new ObjectMapper();
 	private ArrayList<Integer> myVectorClock;
-	private PriorityQueue<BuyTask> buyersQueue;
-	private int totalProfit;
 	
-	public Peer(String id, int maxItemsToSell, int maxThreads, Registry registry, 
-			boolean isBuyer, int maxHops, int totalPeers, String filePath) {
+	private int numBuyers;
+	private int numSellers;
+	private int numTraders;
+	private HashSet<Integer> failedTrader;
+	
+	public Peer(String id, int maxThreads, Registry registry, int mode, DBServer dbServer,
+			int numBuyers, int numSellers, int numTraders) {
 		this.myId = id;
-		this.maxItemsToSell = maxItemsToSell;
-		this.filePath = filePath;
-		this.isBuyer = isBuyer;
-		this.maxHops = maxHops;
+		this.maxItemsToSell = 10;
+		this.dbServer = dbServer;
+		this.mode = mode;
 		this.amITheLeader = false;
-		this.totalPeers = totalPeers;
-		this.totalProfit = 0;
+		this.numBuyers = numBuyers;
+		this.numSellers = numSellers;
+		this.numTraders = numTraders;
 		// initializing the seller mode with randomly selected item
-		if(!this.isBuyer) {
-			int itemSelling = selectItemAtRandom(4);
-			this.itemSelling = itemSelling;
-			this.itemsLeft = this.maxItemsToSell;	// initializing number of items available to max
-			if(this.itemSelling == 3) {
-				this.isBuyer = true;	// Buyer mode
-			}
+//		if(mode == 1) {
+//			int itemSelling = selectItemAtRandom(3);
+//			this.itemSelling = itemSelling;
+//			this.itemsLeft = this.maxItemsToSell;	// initializing number of items available to max
+//			
+//		}
+		if(mode == 2) {
+			this.amITheLeader = true;
 		}
-		
-		
 		// initializing the registry;
 		this.registry = registry;
+		this.failedTrader = new HashSet<Integer>();
 		
 		// Creating a thread pool for server mode of the peer
 		this.serverThreadPool = Executors.newFixedThreadPool(maxThreads);
-		
-		if(totalPeers == Integer.valueOf(id.substring(id.indexOf("_") + 1))) {
-			amITheLeader = true;
-			this.leaderId = this.myId;
-		}
-		
-		this.myVectorClock = new ArrayList<Integer>();
-		for(int i = 0; i<=this.totalPeers; i++)
-			this.myVectorClock.add(0);
-		buyersQueue = getNewQueue();
 	}
 	
 	
-	// Methods exposed by peer as leader
+	// Methods exposed by peer as trader
 	
 	/**
-	 * called by buyer,
+	 * This method is invoked buyer to a trader
 	 * this method will add the buytask to priority queue which will be served by a background thread
 	 */
 	@Override
-	public void buy(long transactionId, String buyerId, String itemNeeded, ArrayList<Integer> buyerClock) throws RemoteException {
+	public boolean buy(long transactionId, String buyerId, String itemNeeded, ArrayList<Integer> buyerClock) throws RemoteException {
 //		System.out.println("Received request to buy " + this.myId + " amIleader = " + this.amITheLeader);
 		if(!this.amITheLeader)
-			return;	// if this peer is a buyer then buy() method should be a no-op
-		
-		
-		BuyTask buyTask = new BuyTask();
-		buyTask.buyerId = buyerId;
-		buyTask.itemName = itemNeeded;
-		buyTask.vectorClock = buyerClock;
-		buyTask.transactionId = transactionId;
-		
-		// Accept parallel requests
-		this.serverThreadPool.submit(() -> {
-			this.buyersQueue.add(buyTask);
+			return false;	// if this peer is a buyer then buy() method should be a no-op
+
+		Future<Boolean> future =  this.serverThreadPool.submit(() -> {
+			return synchronizedBuy(transactionId, buyerId, itemNeeded);
 		});
+
+		try {
+			return future.get();
+		} catch (Exception e) {
+			System.out.println("Exception while returning from future value in buy method");
+			e.printStackTrace();
+		}
+		return false;
+		
+//		// Accept parallel requests
+//		this.serverThreadPool.submit(() -> {
+//			boolean buyResult = synchronizedBuy(0L, buyTask.buyerId, buyTask.itemName, buyTask.vectorClock);
+//
+//		});
 
 	}
 	
@@ -116,39 +119,14 @@ public class Peer implements Gaul {
 	 */
 	
 	@Override
-	public boolean stillAlive() throws RemoteException {
-		return true;	// always responds with true, confirms that the peer is alive.
+	public void offerNewTrader(String newTraderId, String failedTraderId) {
+		if(this.leaderId.equals(failedTraderId))
+			this.leaderId = newTraderId;
 	}
 	
 	@Override
-	public void inititlizeLeader() {
-		this.amITheLeader = true;
-		this.leaderId = this.myId;
-//		this.buyersQueue = getNewQueue();
-		System.out.println(getCurrentTimeStamp() + " Dear Buyers and Sellers, My ID is: " + this.myId + " ... I am the new Coordinator");
-		updateMyIndividualClock();
-		for(int i = 1; i <= this.totalPeers; i++) {
-			String peerId = "Peer_" + i;
-			if(!peerId.equals(this.myId)) {
-				try {
-					Gaul friendPeer = (Gaul) registry.lookup(peerId);
-					friendPeer.passLeaderId(this.myId);
-				} catch (Exception ex) {
-					System.out.println("Informing that " + myId + " is the leader failed to " + peerId);
-				}
-			}
-		}
-		
-		//#### Below lines simulate leader failure
-//		Thread temp = new Thread(() -> {
-//			try {
-//				Thread.currentThread().sleep(10000);
-//				this.registry.unbind(this.myId);
-//			} catch (Exception e) {
-//				// TODO Auto-generated catch block
-//			} // 15 secs
-//		});
-//		temp.start();
+	public boolean stillAlive() throws RemoteException {
+		return true;	// always responds with true, confirms that the peer is alive.
 	}
 	
 	/**
@@ -160,16 +138,13 @@ public class Peer implements Gaul {
 		if(!this.amITheLeader)
 			return;
 		try {
+			
 			Inventory inventory = new Inventory();
 			inventory.itemName = itemName;
 			inventory.numLeft = numItems;
-			inventory.timeOfRegistration = this.myVectorClock.get(Integer.valueOf(this.myId.substring(this.myId.indexOf("_") + 1)));
 			storeMap.put(peerId, inventory);
-			updateMyIndividualClock();
 			String content = mapper.writeValueAsString(storeMap);
-			FileWriter fileWriter = new FileWriter(filePath);
-			fileWriter.write(content);	//Peer_1-Boar-3
-			fileWriter.close();
+			dbServer.writeToDB(content);
 		} catch (IOException e) {
 			e.printStackTrace();
 			System.out.println("Error while opening filewriter in " + this.myId);
@@ -188,53 +163,27 @@ public class Peer implements Gaul {
 	 * Consumed by the leader to inform that it is the leader by passing its peerid.
 	 */
 	@Override
-	public void passLeaderId(String leaderId) {
+	public void startSellerMode() {
 		this.amITheLeader = false;	// resetting in case it was leader previously
-//		System.out.println(" amIleader set to false " + this.myId);
-		this.leaderId = leaderId;
-		Gaul leaderPeer;
-		try {
-			leaderPeer = (Gaul) registry.lookup(leaderId);
-			if(!this.isBuyer) {
-				updateMyIndividualClock();
-				leaderPeer.registerGoodsWithLeader(this.myId, this.items[this.itemSelling], this.itemsLeft);
 
-			}
-			System.out.println(this.myId + " acknowledge that the new leader is: " + this.leaderId);
-		} catch (Exception ex) {
-			System.out.println("Error occured in passLeaderId in " + this.myId);
-		}
-		
-		
-		leaderCheckThread = new Thread(() -> {
-			while(true) {
-				try {
-					Thread.currentThread().sleep(10000);	//every 10 seconds
-				} catch (InterruptedException e) {
-					System.out.println("Exception in thread sleep for leader checkThread in: " + this.myId);
-				}
-				if(this.myId.equals(this.leaderId))	// does not check if the peer itself is a leader.
-					continue;
+		this.leaderId = "Trader_" + (selectItemAtRandom(this.numTraders) + 1);	//picking trader at random
+		System.out.println(this.myId + " picked : " + this.leaderId + " to trade with.");
+		Gaul leaderPeer;
+		ScheduledExecutorService tradeThread = Executors.newScheduledThreadPool(1);
+		tradeThread.scheduleWithFixedDelay(() -> {
 				Gaul leader;
 				try {
-					
-					leader = (Gaul) registry.lookup(leaderId);
-					boolean leaderAlive = leader.stillAlive();
-					if(!leaderAlive)
-						throw new RemoteException();	// simulating leader failure
+						leader = (Gaul) registry.lookup(leaderId);
+						int itemToPick = selectItemAtRandom(3);
+						this.itemSelling = itemToPick;
+						this.itemsLeft = this.maxItemsToSell;
+						System.out.println(this.myId + " Picked " + this.items[this.itemSelling] + " to sell");
+						notifyLeader();
 					} catch (Exception e) {
-					System.out.println(this.myId + "detected that leader : " + leaderId + " not alive, initializing leader election");
-					
-					long startTime = System.currentTimeMillis();
-					beginLeaderElection();
-					long endTime = System.currentTimeMillis();
-					System.out.println("The new leader elected in " + (endTime - startTime) + "ms");
-				}
-				
-			}
-		});
+						System.out.println(this.myId + "detected that leader : " + leaderId + " not alive, Waiting for new Leader to register");
+					}
+		}, 0, 30, TimeUnit.SECONDS);
 		
-		leaderCheckThread.start();	//begin the leader alive check thread
 	}
 	
 	
@@ -244,12 +193,11 @@ public class Peer implements Gaul {
 	
 	@Override
 	public void notifyLeader() {
-		if(this.isBuyer || this.myId.equals(this.leaderId))
+		if(this.mode == 0 || this.myId.equals(this.leaderId))
 			return;
 		Gaul leader;
 		try {
 			leader = (Gaul) registry.lookup(this.leaderId);
-			updateMyIndividualClock();
 
 			leader.registerGoodsWithLeader(this.myId, this.items[this.itemSelling], this.itemsLeft);
 		} catch (Exception ex) {
@@ -264,17 +212,11 @@ public class Peer implements Gaul {
 	 */
 	// seller mode
 	@Override
-	public boolean itemSoldNotification(String itemName, int quantitySold, ArrayList<Integer> traderClock) {
+	public boolean itemSoldNotification(String itemName, int quantitySold) {
 		System.out.println("Peer: " + this.myId + " is notified that its item " + itemName + " is sold.");
 		synchronized (this) {
 			this.itemsLeft = this.itemsLeft - quantitySold;
-			for(int i = 0; i < this.items.length; i++) {
-				if(this.items[i].equals(itemName)) {
-					this.totalProfit += i + 1;
-					break;
-				}
-			}
-			updateMyClock(traderClock);
+			
 			if(this.itemsLeft == 0) {
 				int itemToPick = selectItemAtRandom(3);
 				this.itemSelling = itemToPick;
@@ -288,80 +230,19 @@ public class Peer implements Gaul {
 	}
 	
 	/**
-	 * The method performs actual logic of pinging all peers with higher id to see if its alive and make it the new leader.
-	 */
-	
-	public void beginLeaderElection() {
-		int myPeerNumber = Integer.valueOf(this.myId.substring(this.myId.indexOf("_") + 1));
-		boolean foundNewLeader = false;
-		updateMyIndividualClock();
-
-		for(int i = totalPeers; i >= myPeerNumber; i--) {
-			Gaul peer = null;
-			try {
-				peer = (Gaul) this.registry.lookup("Peer_" + i);
-			} catch (Exception ex) {
-				System.out.println("Peer_" + i + " is no more alive, so can't be a leader.");
-				continue;
-			}
-			boolean isAlive;
-			try {
-				isAlive = peer.stillAlive();
-				if(isAlive) {
-					peer.inititlizeLeader();		// #### chance of deadlock here (distributed deadlock)
-					break;	
-				}
-			} catch (RemoteException e) {
-				System.out.println("Error while pinging " + "Peer_" + i + " probably it is down.");
-			}
-			
-			
-		}
-	}
-	
-	// methods exposed by peer as seller ends here
-	
-	
-	
-	private void updateMyIndividualClock() {
-		int id = Integer.valueOf(this.myId.substring(this.myId.indexOf("_") + 1));
-		this.myVectorClock.set(id, this.myVectorClock.get(id) + 1);
-	}
-	
-	private void updateMyClock(ArrayList<Integer> otherPeersClock) {
-		for(int i = 0; i < otherPeersClock.size(); i++) {
-			
-			this.myVectorClock.set(i, Math.max(this.myVectorClock.get(i), otherPeersClock.get(i) + (i == Integer.valueOf(this.myId.substring(this.myId.indexOf("_") + 1)) ? 1 : 0)));
-		}
-//		System.out.println(this.myId + " clock is: " + this.myVectorClock);
-		return;
-	}
-	
-	
-	/**
 	 * The Actual buy logic happens here.
 	 */
-	private boolean synchronizedBuy(long transactionId, String buyerId, String itemNeeded, ArrayList<Integer> buyerClock) {
+	private Boolean synchronizedBuy(long transactionId, String buyerId, String itemNeeded) {
 		synchronized (this) {
 			try {
 				storeMap = new HashMap<String, Inventory>();
 				
-				BufferedReader reader = new BufferedReader(new FileReader(filePath));
-				StringBuilder stringBuilder = new StringBuilder();
-				char[] buffer = new char[10];
-				while (reader.read(buffer) != -1) {
-					stringBuilder.append(new String(buffer));
-					buffer = new char[10];
-				}
-				reader.close();
-
-				String content = stringBuilder.toString();
+				String content = dbServer.readFromDB();
 								
 				if(!content.equals("")) {
 					this.storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
 					
 				}
-				int minTimeStamp = 99999999;
 				String peerToSellFrom = "";
 				for(String peerId : storeMap.keySet()) {
 					if(peerId.equals(this.myId))	continue;
@@ -369,10 +250,8 @@ public class Peer implements Gaul {
 					Inventory curr = storeMap.get(peerId);
 					if(curr.itemName.equals(itemNeeded)) {
 						if(curr.numLeft > 0) {
-							if(curr.timeOfRegistration < minTimeStamp) {
-								minTimeStamp = curr.timeOfRegistration;
-								peerToSellFrom = peerId;
-							}
+							peerToSellFrom = peerId;
+							break;
 							
 						}
 					}
@@ -383,16 +262,15 @@ public class Peer implements Gaul {
 					Inventory curr = storeMap.get(peerToSellFrom);
 					curr.numLeft = curr.numLeft - 1;
 					Gaul peer = (Gaul) registry.lookup(peerToSellFrom);
-					updateMyClock(buyerClock);
-					peer.itemSoldNotification(itemNeeded, 1, this.myVectorClock);
-					System.out.println(getCurrentTimeStamp() +" " + buyerId +  " bought " + itemNeeded + " from " + peerToSellFrom);
+					peer.itemSoldNotification(itemNeeded, 1);
+//					System.out.println(getCurrentTimeStamp() +" " + buyerId +  " bought " + itemNeeded + " from " + peerToSellFrom);
+				}
+				else {
+					return false;
 				}
 				
 				String newContent = mapper.writeValueAsString(storeMap);
-				FileWriter writer = new FileWriter(filePath);
-				writer.write(newContent);
-				writer.flush();
-				writer.close();
+				dbServer.writeToDB(newContent);
 				
 				return true;	// item sold successfully
 				
@@ -409,39 +287,66 @@ public class Peer implements Gaul {
 	
 	@Override
 	public void startTraderMode() throws RemoteException{
-		Thread server = new Thread(new ServerRunnable());
-		server.start();
+		ScheduledExecutorService heartBeatThread = Executors.newScheduledThreadPool(1);
+
+		heartBeatThread.scheduleWithFixedDelay(new HeartBeatRunnable(), 
+				1, 10, TimeUnit.SECONDS);
 	}
 	
-	class ServerRunnable implements Runnable{
-		
+	class HeartBeatRunnable implements Runnable{
+
 		@Override
 		public void run() {
-			while(true) {
-				
-				if(!amITheLeader)
-					continue;
-				try {
-					Thread.currentThread().sleep(100);
-				} catch (InterruptedException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-				
-				if(buyersQueue.isEmpty())
-					continue;
-				BuyTask buyTask = buyersQueue.poll();
-				boolean buyResult = synchronizedBuy(0L, buyTask.buyerId, buyTask.itemName, buyTask.vectorClock);
-//				System.out.println("Time taken to serve a buyRequest is: " + (System.currentTimeMillis() - buyTask.transactionId));
+				Gaul colleague;
+				for(int i = 1; i <= numTraders; i++) {
+					String colleagueId = "Trader_" + i;
+					if(colleagueId.equals(myId))
+						continue;
+					try {
+						colleague = (Gaul) registry.lookup(colleagueId);
+						if(!colleague.stillAlive())
+							throw new RemoteException();
+					} catch (RemoteException | NotBoundException e) {
+						System.out.println("Error occured while connecting to trader: " + colleagueId + " by: " + myId);
+						helpPeers(colleagueId);
+					}
+					
+				}			
+		}
+		
+	}
+	
+	public void helpPeers(String failedPeerId) {
+		Gaul buyer, seller;
+		try {
+			for(int i = 1; i <= numBuyers; i++) {
+				buyer = (Gaul) registry.lookup("Buyer_" + i);
+				buyer.offerNewTrader(myId, failedPeerId);
+			}
+			
+			for(int i = 1; i <= numSellers; i++) {
+				seller = (Gaul) registry.lookup("Seller_" + i);
+				seller.offerNewTrader(myId, failedPeerId);
 				
 			}
 		}
+		catch (Exception e) {
+			System.out.println("Error occured while offering new leader");
+		}
+		
 	}
+	
 	
 	@Override
 	public void startClientMode() throws RemoteException{
-		Thread client = new Thread(new ClientRunnable());	// start a separate thread for buyer mode
-		client.start();
+		this.amITheLeader = false;	// resetting in case it was leader previously
+//		System.out.println(" amIleader set to false " + this.myId);
+		this.leaderId = "Trader_" + (selectItemAtRandom(this.numTraders) + 1);
+		System.out.println(this.myId + " picked : " + this.leaderId + " to buy from.");
+
+		ScheduledExecutorService client = Executors.newScheduledThreadPool(1);
+		
+		client.scheduleWithFixedDelay(new ClientRunnable(), 5, 5, TimeUnit.SECONDS);
 
 	}
 	
@@ -449,26 +354,25 @@ public class Peer implements Gaul {
 
 		@Override
 		public void run() {
-			if(!isBuyer)
+			if(mode != 0)
 				return;
-			while(true) {
+			try {
 				
-				try {
-					Thread.currentThread().sleep(3000);	// wait for 3 seconds before requesting another item - not mandatory
-					
-					String productToBuy = items[selectItemAtRandom(3)];
-					int maxHopCount = maxHops; // max hops allowed
-					Gaul leader = (Gaul) registry.lookup(leaderId);
-					System.out.println("Requesting to buy: " + productToBuy + " by " + myId);
-					updateMyIndividualClock();
+				String productToBuy = items[selectItemAtRandom(3)];
+				Gaul leader = (Gaul) registry.lookup(leaderId);
+				System.out.println("Requesting to buy: " + productToBuy + " by " + myId);
 
-					leader.buy(System.currentTimeMillis(), myId, productToBuy, myVectorClock);
-				} catch (Exception e1) {
-//					System.out.println("Error in Client Thread to fetch the leader");
+				boolean isItemBought = leader.buy(System.currentTimeMillis(), myId, productToBuy, myVectorClock);
+				if(isItemBought) {
+					System.out.println("Bought: " + productToBuy + " by " + myId + " through: " + leaderId);
 				}
-					
-			}
+				else {
+					System.out.println(myId + " cannot buy " + productToBuy);
+				}
 			
+			} catch (Exception e1) {
+				System.out.println("Error in Client Thread to fetch the leader");
+			}
 		}
 	}
 		
@@ -484,36 +388,6 @@ public class Peer implements Gaul {
 		SimpleDateFormat formatter = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");  
 	    Date date = new Date();
 	    return formatter.format(date);
-	}
-	
-	private PriorityQueue getNewQueue() {
-		return new PriorityQueue<BuyTask>((t1,t2) -> {
-			ArrayList<Integer> a = t1.vectorClock, b = t2.vectorClock;
-			
-			boolean aBig = false, bBig = false;
-			for(int i = 0; i < a.size(); i++) {
-				if(a.get(i) == b.get(i))
-					continue;
-				if(a.get(i) > b.get(i)) {
-					if(bBig)
-						return 0;
-					aBig = true;
-				}
-				else {
-					if(aBig)
-						return 0;
-					bBig = true;
-				}
-				
-			}
-			
-			if(aBig == true && bBig == true)
-				return 0;
-			if(aBig)
-				return 1;
-			return -1;	// if b is higher;
-			
-		});
 	}
 	
 }
