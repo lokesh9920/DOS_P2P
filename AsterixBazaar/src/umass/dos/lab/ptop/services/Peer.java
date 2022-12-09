@@ -50,9 +50,10 @@ public class Peer implements Gaul {
 	private int numSellers;
 	private int numTraders;
 	private HashSet<Integer> failedTrader;
+	private boolean useCache;
 	
 	public Peer(String id, int maxThreads, Registry registry, int mode, DBServer dbServer,
-			int numBuyers, int numSellers, int numTraders) {
+			int numBuyers, int numSellers, int numTraders, boolean useCache) {
 		this.myId = id;
 		this.maxItemsToSell = 10;
 		this.dbServer = dbServer;
@@ -74,6 +75,7 @@ public class Peer implements Gaul {
 		// initializing the registry;
 		this.registry = registry;
 		this.failedTrader = new HashSet<Integer>();
+		this.useCache = useCache;
 		
 		// Creating a thread pool for server mode of the peer
 		this.serverThreadPool = Executors.newFixedThreadPool(maxThreads);
@@ -142,9 +144,8 @@ public class Peer implements Gaul {
 			Inventory inventory = new Inventory();
 			inventory.itemName = itemName;
 			inventory.numLeft = numItems;
-			storeMap.put(peerId, inventory);
-			String content = mapper.writeValueAsString(storeMap);
-			dbServer.writeToDB(content);
+			String key = peerId + "-" + this.myId;
+			this.storeMap = dbServer.safeRegisterGoods(key, inventory);
 		} catch (IOException e) {
 			e.printStackTrace();
 			System.out.println("Error while opening filewriter in " + this.myId);
@@ -235,22 +236,25 @@ public class Peer implements Gaul {
 	private Boolean synchronizedBuy(long transactionId, String buyerId, String itemNeeded) {
 		synchronized (this) {
 			try {
-				storeMap = new HashMap<String, Inventory>();
-				
-				String content = dbServer.readFromDB();
-								
-				if(!content.equals("")) {
-					this.storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+				if(storeMap.size() == 0 || !this.useCache) {	// get the latest data from the file if CACHE is not used
+					storeMap = new HashMap<String, Inventory>();
 					
+					String content = dbServer.readFromDB();
+
+					if(!content.equals("")) {
+						this.storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+						
+					}
 				}
+				// if cache is not empty them make decision based on cache
 				String peerToSellFrom = "";
-				for(String peerId : storeMap.keySet()) {
-					if(peerId.equals(this.myId))	continue;
-					
-					Inventory curr = storeMap.get(peerId);
+				for(String key : storeMap.keySet()) {
+					if(!key.contains(this.myId))
+						continue; // sell only from sellers registered with this trader
+					Inventory curr = storeMap.get(key);
 					if(curr.itemName.equals(itemNeeded)) {
 						if(curr.numLeft > 0) {
-							peerToSellFrom = peerId;
+							peerToSellFrom = key;
 							break;
 							
 						}
@@ -259,18 +263,18 @@ public class Peer implements Gaul {
 				}
 				// Selling from the seller which registered first with the trader
 				if(!peerToSellFrom.equals("")) {
-					Inventory curr = storeMap.get(peerToSellFrom);
-					curr.numLeft = curr.numLeft - 1;
-					Gaul peer = (Gaul) registry.lookup(peerToSellFrom);
+					try{
+						dbServer.safeWrite(peerToSellFrom, 1); // could  not write, may be some other trader sold it meanwhile
+					}catch (RuntimeException e) {
+						System.out.println(this.myId + " " + e.getMessage());
+					}
+					Gaul peer = (Gaul) registry.lookup(peerToSellFrom.substring(0,peerToSellFrom.indexOf("-")));
 					peer.itemSoldNotification(itemNeeded, 1);
 //					System.out.println(getCurrentTimeStamp() +" " + buyerId +  " bought " + itemNeeded + " from " + peerToSellFrom);
 				}
 				else {
 					return false;
 				}
-				
-				String newContent = mapper.writeValueAsString(storeMap);
-				dbServer.writeToDB(newContent);
 				
 				return true;	// item sold successfully
 				
