@@ -13,9 +13,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-public class DBServer {
+public class DBServer implements DataBase{
 
-	String sharedFilePath = "";
+	private String sharedFilePath = "";
 	
 	public DBServer() {
 		File sharedFile = new File("BuyersData.txt");
@@ -30,12 +30,14 @@ public class DBServer {
 		this.sharedFilePath = sharedFile.getAbsolutePath();
 	}
 	
+	@Override
 	public void refreshFile() throws IOException {
 		FileWriter fileWriter = new FileWriter(this.sharedFilePath);
 		fileWriter.write("");	//Peer_1-Boar-3
 		fileWriter.close();
 		
 	}
+	@Override
 	public void writeToDB(String content) throws IOException {
 		
 		FileWriter fileWriter = new FileWriter(this.sharedFilePath);
@@ -44,6 +46,7 @@ public class DBServer {
 		
 	}
 	
+	@Override
 	public String readFromDB() throws IOException {
 		BufferedReader reader = new BufferedReader(new FileReader(this.sharedFilePath));
 		StringBuilder stringBuilder = new StringBuilder();
@@ -59,40 +62,47 @@ public class DBServer {
 		return content;
 	}
 	
-	public synchronized HashMap<String, Inventory> safeWrite(String key, int decrementBy) throws IOException {
-		ObjectMapper mapper = new ObjectMapper();
-		HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
-		
-		String content = this.readFromDB();
-						
-		if(!content.equals("")) {
-			storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+	@Override
+	public HashMap<String, Inventory> safeWrite(String key, String itemName, int decrementBy) throws IOException {
+		synchronized (this) {
+			ObjectMapper mapper = new ObjectMapper();
+			HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
 			
+			String content = this.readFromDB();
+							
+			if(!content.equals("")) {
+				storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+				
+			}
+			Inventory curr = storeMap.getOrDefault(key, null);
+			if(curr == null)
+				throw new RuntimeException("Warehouse rejected buy request because inventory was oversold");
+			if(curr.numLeft <= 0 || !curr.itemName.equals(itemName))
+				throw new RuntimeException("Warehouse rejected buy request because inventory was oversold");
+			curr.numLeft = curr.numLeft - decrementBy;
+			String newContent = mapper.writeValueAsString(storeMap);
+			writeToDB(newContent);
+			return storeMap;	
 		}
-		Inventory curr = storeMap.getOrDefault(key, null);
-		if(curr == null)
-			throw new RuntimeException("OverSell");
-		if(curr.numLeft <= 0)
-			throw new RuntimeException("OverSell");
-		curr.numLeft = curr.numLeft - decrementBy;
-		String newContent = mapper.writeValueAsString(storeMap);
-		writeToDB(newContent);
-		return storeMap;
 	}
-	public synchronized HashMap<String, Inventory> safeRegisterGoods(String key, Inventory inventory) throws IOException {
-		ObjectMapper mapper = new ObjectMapper();
-		HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
-		
-		String content = this.readFromDB();
-						
-		if(!content.equals("")) {
-			storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+	
+	@Override
+	public HashMap<String, Inventory> safeRegisterGoods(String key, Inventory inventory) throws IOException {
+		synchronized(this) {
+			ObjectMapper mapper = new ObjectMapper();
+			HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
 			
+			String content = this.readFromDB();
+							
+			if(!content.equals("")) {
+				storeMap = mapper.readValue(content, new TypeReference<HashMap<String, Inventory>>(){});
+				
+			}
+			
+			storeMap.put(key, inventory);
+			String newContent = mapper.writeValueAsString(storeMap);
+			writeToDB(newContent);
+			return storeMap;
 		}
-		
-		storeMap.put(key, inventory);
-		String newContent = mapper.writeValueAsString(storeMap);
-		writeToDB(newContent);
-		return storeMap;
 	}
 }

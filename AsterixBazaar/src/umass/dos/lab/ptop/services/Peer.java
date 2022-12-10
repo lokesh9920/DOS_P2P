@@ -1,19 +1,13 @@
 package umass.dos.lab.ptop.services;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.rmi.AccessException;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.Registry;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,51 +29,52 @@ public class Peer implements Gaul {
 	private ExecutorService serverThreadPool;
 	private int mode;
 	private Random random = new Random();
-	private int maxHops;
 
 	
 	private boolean amITheLeader;
 	private String leaderId;
-	private int totalPeers;
-	private DBServer dbServer = null;
+	private String dbCreds;
 	private HashMap<String, Inventory> storeMap = new HashMap<String, Inventory>();
 	private ObjectMapper mapper = new ObjectMapper();
-	private ArrayList<Integer> myVectorClock;
-	
+	private HashSet<String> failedTraders;
 	private int numBuyers;
 	private int numSellers;
 	private int numTraders;
-	private HashSet<Integer> failedTrader;
 	private boolean useCache;
 	
-	public Peer(String id, int maxThreads, Registry registry, int mode, DBServer dbServer,
+	private int numBuyRequestsMetrics;
+	private int numOverSellMetrics;
+	
+	public Peer(String id, int maxThreads, Registry registry, int mode, String dbCreds,
 			int numBuyers, int numSellers, int numTraders, boolean useCache) {
 		this.myId = id;
-		this.maxItemsToSell = 10;
-		this.dbServer = dbServer;
+		this.maxItemsToSell = 5;
+		this.dbCreds = dbCreds;
 		this.mode = mode;
 		this.amITheLeader = false;
 		this.numBuyers = numBuyers;
 		this.numSellers = numSellers;
 		this.numTraders = numTraders;
-		// initializing the seller mode with randomly selected item
-//		if(mode == 1) {
-//			int itemSelling = selectItemAtRandom(3);
-//			this.itemSelling = itemSelling;
-//			this.itemsLeft = this.maxItemsToSell;	// initializing number of items available to max
-//			
-//		}
 		if(mode == 2) {
 			this.amITheLeader = true;
 		}
 		// initializing the registry;
 		this.registry = registry;
-		this.failedTrader = new HashSet<Integer>();
 		this.useCache = useCache;
+		this.numBuyRequestsMetrics = 0;
+		this.numOverSellMetrics = 0;
 		
+		
+		this.failedTraders = new HashSet<String>();
 		// Creating a thread pool for server mode of the peer
 		this.serverThreadPool = Executors.newFixedThreadPool(maxThreads);
+		if(this.useCache) {
+			ScheduledExecutorService cacheUpdateThread = Executors.newScheduledThreadPool(1);
+			cacheUpdateThread.scheduleWithFixedDelay(new CacheRunnable(), 10, 10, TimeUnit.SECONDS);
+		}
 	}
+	
+	
 	
 	
 	// Methods exposed by peer as trader
@@ -89,28 +84,23 @@ public class Peer implements Gaul {
 	 * this method will add the buytask to priority queue which will be served by a background thread
 	 */
 	@Override
-	public boolean buy(long transactionId, String buyerId, String itemNeeded, ArrayList<Integer> buyerClock) throws RemoteException {
-//		System.out.println("Received request to buy " + this.myId + " amIleader = " + this.amITheLeader);
+	public boolean buy(long transactionId, String buyerId, String itemNeeded) throws RemoteException {
 		if(!this.amITheLeader)
 			return false;	// if this peer is a buyer then buy() method should be a no-op
-
+		
 		Future<Boolean> future =  this.serverThreadPool.submit(() -> {
 			return synchronizedBuy(transactionId, buyerId, itemNeeded);
 		});
 
 		try {
+			this.numBuyRequestsMetrics++;	// counting number of buy requests served
 			return future.get();
 		} catch (Exception e) {
 			System.out.println("Exception while returning from future value in buy method");
 			e.printStackTrace();
 		}
 		return false;
-		
-//		// Accept parallel requests
-//		this.serverThreadPool.submit(() -> {
-//			boolean buyResult = synchronizedBuy(0L, buyTask.buyerId, buyTask.itemName, buyTask.vectorClock);
-//
-//		});
+
 
 	}
 	
@@ -121,9 +111,9 @@ public class Peer implements Gaul {
 	 */
 	
 	@Override
-	public void offerNewTrader(String newTraderId, String failedTraderId) {
-		if(this.leaderId.equals(failedTraderId))
-			this.leaderId = newTraderId;
+	public void informTraderFailure(String failedTraderId) {
+		System.out.println(getCurrentTimeStamp() + this.myId + " got to know that the trader: " + failedTraderId + " has failed");
+		this.failedTraders.add(failedTraderId);
 	}
 	
 	@Override
@@ -136,7 +126,7 @@ public class Peer implements Gaul {
 	 */
 	@Override
 	public void registerGoodsWithLeader(String peerId, String itemName, int numItems) {
-		System.out.println(peerId + " came to register goods " + itemName);
+		System.out.println(getCurrentTimeStamp() + " " + peerId + " came to register its goods " + itemName + " with " + this.myId);
 		if(!this.amITheLeader)
 			return;
 		try {
@@ -144,7 +134,13 @@ public class Peer implements Gaul {
 			Inventory inventory = new Inventory();
 			inventory.itemName = itemName;
 			inventory.numLeft = numItems;
-			String key = peerId + "-" + this.myId;
+			String key = peerId;
+			DBServer dbServer = null;
+			try{
+				dbServer = (DBServer) registry.lookup(this.dbCreds);
+			}catch (Exception e) {
+				System.out.println("Failed to Fetch DBServer");
+			}
 			this.storeMap = dbServer.safeRegisterGoods(key, inventory);
 		} catch (IOException e) {
 			e.printStackTrace();
@@ -166,22 +162,26 @@ public class Peer implements Gaul {
 	@Override
 	public void startSellerMode() {
 		this.amITheLeader = false;	// resetting in case it was leader previously
-
-		this.leaderId = "Trader_" + (selectItemAtRandom(this.numTraders) + 1);	//picking trader at random
-		System.out.println(this.myId + " picked : " + this.leaderId + " to trade with.");
-		Gaul leaderPeer;
 		ScheduledExecutorService tradeThread = Executors.newScheduledThreadPool(1);
 		tradeThread.scheduleWithFixedDelay(() -> {
 				Gaul leader;
+				String newLeaderId = "";
 				try {
-						leader = (Gaul) registry.lookup(leaderId);
+						boolean pickedNewLeader = false;
+						while(!pickedNewLeader) {
+							newLeaderId = "Trader_" + (selectItemAtRandom(numTraders) + 1);
+							if(failedTraders.contains(newLeaderId))
+								continue;
+							pickedNewLeader = true;
+							leader = (Gaul) registry.lookup(newLeaderId);
+						}
 						int itemToPick = selectItemAtRandom(3);
 						this.itemSelling = itemToPick;
 						this.itemsLeft = this.maxItemsToSell;
-						System.out.println(this.myId + " Picked " + this.items[this.itemSelling] + " to sell");
-						notifyLeader();
+						System.out.println(getCurrentTimeStamp() + " " +  this.myId + " Picked " + this.items[this.itemSelling] + " to sell");
+						notifyLeader(newLeaderId);
 					} catch (Exception e) {
-						System.out.println(this.myId + "detected that leader : " + leaderId + " not alive, Waiting for new Leader to register");
+						System.out.println(this.myId + "detected that leader : " + newLeaderId + " not alive, Waiting for new Leader to register");
 					}
 		}, 0, 30, TimeUnit.SECONDS);
 		
@@ -193,16 +193,14 @@ public class Peer implements Gaul {
 	 */
 	
 	@Override
-	public void notifyLeader() {
-		if(this.mode == 0 || this.myId.equals(this.leaderId))
-			return;
+	public void notifyLeader(String newLeaderId) {
 		Gaul leader;
 		try {
-			leader = (Gaul) registry.lookup(this.leaderId);
+			leader = (Gaul) registry.lookup(newLeaderId);
 
 			leader.registerGoodsWithLeader(this.myId, this.items[this.itemSelling], this.itemsLeft);
 		} catch (Exception ex) {
-			System.out.println("Error while fetching leader in " + this.myId);
+//			System.out.println("Error while fetching leader in " + this.myId);
 		}
 		
 		
@@ -214,16 +212,24 @@ public class Peer implements Gaul {
 	// seller mode
 	@Override
 	public boolean itemSoldNotification(String itemName, int quantitySold) {
-		System.out.println("Peer: " + this.myId + " is notified that its item " + itemName + " is sold.");
+		System.out.println(getCurrentTimeStamp() + " " +  "Peer: " + this.myId + " is notified that its item " + itemName + " is sold.");
 		synchronized (this) {
 			this.itemsLeft = this.itemsLeft - quantitySold;
 			
 			if(this.itemsLeft == 0) {
+				boolean pickedNewLeader = false;
+				String newLeader = "";
+				while(!pickedNewLeader) {
+					newLeader = "Trader_" + (selectItemAtRandom(numTraders) + 1);
+					if(failedTraders.contains(newLeader))
+						continue;
+					pickedNewLeader = true;
+				}
 				int itemToPick = selectItemAtRandom(3);
 				this.itemSelling = itemToPick;
 				this.itemsLeft = this.maxItemsToSell;
-				System.out.println(this.myId + " Picked " + this.items[this.itemSelling] + " to sell");
-				notifyLeader();
+				System.out.println(getCurrentTimeStamp() + " " +  this.myId + " Picked " + this.items[this.itemSelling] + " to sell");
+				notifyLeader(newLeader);
 			}
 			
 			return true;
@@ -238,7 +244,12 @@ public class Peer implements Gaul {
 			try {
 				if(storeMap.size() == 0 || !this.useCache) {	// get the latest data from the file if CACHE is not used
 					storeMap = new HashMap<String, Inventory>();
-					
+					DBServer dbServer = null;
+					try{
+						dbServer = (DBServer) registry.lookup(this.dbCreds);
+					}catch (Exception e) {
+						System.out.println("Failed to Fetch DBServer");
+					}
 					String content = dbServer.readFromDB();
 
 					if(!content.equals("")) {
@@ -249,11 +260,12 @@ public class Peer implements Gaul {
 				// if cache is not empty them make decision based on cache
 				String peerToSellFrom = "";
 				for(String key : storeMap.keySet()) {
-					if(!key.contains(this.myId))
-						continue; // sell only from sellers registered with this trader
+//					if(!key.contains(this.myId))
+//						continue; // sell only from sellers registered with this trader
 					Inventory curr = storeMap.get(key);
 					if(curr.itemName.equals(itemNeeded)) {
 						if(curr.numLeft > 0) {
+							curr.numLeft = curr.numLeft - 1;
 							peerToSellFrom = key;
 							break;
 							
@@ -263,19 +275,34 @@ public class Peer implements Gaul {
 				}
 				// Selling from the seller which registered first with the trader
 				if(!peerToSellFrom.equals("")) {
+					DBServer dbServer = null;
 					try{
-						dbServer.safeWrite(peerToSellFrom, 1); // could  not write, may be some other trader sold it meanwhile
-					}catch (RuntimeException e) {
-						System.out.println(this.myId + " " + e.getMessage());
+						
+						try{
+							dbServer = (DBServer) registry.lookup(this.dbCreds);
+						}catch (Exception e) {
+							System.out.println("Failed to Fetch DBServer");
+						}
+						dbServer.safeWrite(peerToSellFrom, itemNeeded, 1); // could  not write, may be some other trader sold it meanwhile
+					}catch (RuntimeException e) {	// warehouse said either over-sold or under-sold
+						System.out.println(getCurrentTimeStamp() + " " + this.myId  + e.getMessage());
+						this.numOverSellMetrics++;	// counting number of overkills for metrics collection
+						String latestContent = dbServer.readFromDB();
+						if(!latestContent.equals("")) {
+							storeMap = mapper.readValue(latestContent, new TypeReference<HashMap<String, Inventory>>(){});
+							// update the cache when there is a cache miss during the times of over-sold
+						}
 					}
-					Gaul peer = (Gaul) registry.lookup(peerToSellFrom.substring(0,peerToSellFrom.indexOf("-")));
+					Gaul peer = (Gaul) registry.lookup(peerToSellFrom);
 					peer.itemSoldNotification(itemNeeded, 1);
-//					System.out.println(getCurrentTimeStamp() +" " + buyerId +  " bought " + itemNeeded + " from " + peerToSellFrom);
 				}
 				else {
+					System.out.println(getCurrentTimeStamp() + "  " + this.myId + " informed " + buyerId + " that " + itemNeeded + " is not available");
+
 					return false;
 				}
 				
+				System.out.println(getCurrentTimeStamp() + " " + this.myId + " sold " + itemNeeded + " to " + buyerId);
 				return true;	// item sold successfully
 				
 				
@@ -295,6 +322,41 @@ public class Peer implements Gaul {
 
 		heartBeatThread.scheduleWithFixedDelay(new HeartBeatRunnable(), 
 				1, 10, TimeUnit.SECONDS);
+		
+		ScheduledExecutorService metricsThread = Executors.newScheduledThreadPool(1);
+
+		metricsThread.scheduleWithFixedDelay(new MetricRunnable(), 
+				1, 1, TimeUnit.SECONDS);
+		
+//		Simulating thread failure
+		
+//		Thread threadFailureSimulator = new Thread(() -> {
+//			try {
+//				if(!myId.equals("Trader_2"))
+//						return;
+//				Thread.currentThread().sleep(15000);
+//				System.out.println(getCurrentTimeStamp() + " " + myId + " simulating death....");
+//				registry.unbind(myId);
+//			} catch (Exception e) {
+//				e.printStackTrace();
+//			}
+//			
+//			
+//		});
+//		threadFailureSimulator.start();
+	}
+	
+	class MetricRunnable implements Runnable{
+
+		@Override
+		public void run() {
+			System.out.println("#################### The number of buy request processed in last 1 minute by " + myId + " are: " + numBuyRequestsMetrics);
+			if(useCache)
+				System.out.println("#################### The number of over-sellings made in last 1 minute by " + myId + " are: " + numOverSellMetrics);
+			numBuyRequestsMetrics = 0;
+			numOverSellMetrics = 0;
+		}
+		
 	}
 	
 	class HeartBeatRunnable implements Runnable{
@@ -304,14 +366,15 @@ public class Peer implements Gaul {
 				Gaul colleague;
 				for(int i = 1; i <= numTraders; i++) {
 					String colleagueId = "Trader_" + i;
-					if(colleagueId.equals(myId))
+					if(colleagueId.equals(myId) || failedTraders.contains(colleagueId))
 						continue;
 					try {
 						colleague = (Gaul) registry.lookup(colleagueId);
 						if(!colleague.stillAlive())
 							throw new RemoteException();
 					} catch (RemoteException | NotBoundException e) {
-						System.out.println("Error occured while connecting to trader: " + colleagueId + " by: " + myId);
+						System.out.println(getCurrentTimeStamp() + " " + myId + " detected that the trader: " + colleagueId + " has failed, proceeding to notify all buyers and sellers");
+						failedTraders.add(colleagueId);
 						helpPeers(colleagueId);
 					}
 					
@@ -325,12 +388,12 @@ public class Peer implements Gaul {
 		try {
 			for(int i = 1; i <= numBuyers; i++) {
 				buyer = (Gaul) registry.lookup("Buyer_" + i);
-				buyer.offerNewTrader(myId, failedPeerId);
+				buyer.informTraderFailure(failedPeerId);
 			}
 			
 			for(int i = 1; i <= numSellers; i++) {
 				seller = (Gaul) registry.lookup("Seller_" + i);
-				seller.offerNewTrader(myId, failedPeerId);
+				seller.informTraderFailure(failedPeerId);
 				
 			}
 		}
@@ -340,17 +403,13 @@ public class Peer implements Gaul {
 		
 	}
 	
-	
 	@Override
 	public void startClientMode() throws RemoteException{
 		this.amITheLeader = false;	// resetting in case it was leader previously
-//		System.out.println(" amIleader set to false " + this.myId);
-		this.leaderId = "Trader_" + (selectItemAtRandom(this.numTraders) + 1);
-		System.out.println(this.myId + " picked : " + this.leaderId + " to buy from.");
 
 		ScheduledExecutorService client = Executors.newScheduledThreadPool(1);
 		
-		client.scheduleWithFixedDelay(new ClientRunnable(), 5, 5, TimeUnit.SECONDS);
+		client.scheduleWithFixedDelay(new ClientRunnable(), 5, 5, TimeUnit.MILLISECONDS);
 
 	}
 	
@@ -360,27 +419,75 @@ public class Peer implements Gaul {
 		public void run() {
 			if(mode != 0)
 				return;
+			String newLeaderId  = "";
+			Gaul leader = null;
 			try {
-				
+				boolean pickedNewLeader = false;
+				while(!pickedNewLeader) {
+					newLeaderId = "Trader_" + (selectItemAtRandom(numTraders) + 1);
+					if(failedTraders.contains(newLeaderId)) {
+						continue;
+					}
+					pickedNewLeader = true;
+					leader = (Gaul) registry.lookup(newLeaderId);
+				}
 				String productToBuy = items[selectItemAtRandom(3)];
-				Gaul leader = (Gaul) registry.lookup(leaderId);
-				System.out.println("Requesting to buy: " + productToBuy + " by " + myId);
+				
+				System.out.println(getCurrentTimeStamp() + " Requesting to buy: " + productToBuy + " by " + myId + " to " + newLeaderId);
 
-				boolean isItemBought = leader.buy(System.currentTimeMillis(), myId, productToBuy, myVectorClock);
+				boolean isItemBought = false;
+				try {
+					isItemBought = leader.buy(System.currentTimeMillis(), myId, productToBuy);
+
+				}catch (Exception e) {
+					System.out.println(getCurrentTimeStamp() +  "Buy request failed in mid of processing at trader end, regenerating request with another trader");
+					boolean gotNewLeader = false;
+					while(!gotNewLeader) {
+						newLeaderId = "Trader_" + (selectItemAtRandom(numTraders) + 1);
+						if(failedTraders.contains(newLeaderId)) {
+							continue;
+						}
+						gotNewLeader = true;
+						leader = (Gaul) registry.lookup(newLeaderId);
+					}
+					isItemBought = leader.buy(System.currentTimeMillis(), myId, productToBuy);	// sending request to another trader
+				}
 				if(isItemBought) {
-					System.out.println("Bought: " + productToBuy + " by " + myId + " through: " + leaderId);
+					System.out.println(getCurrentTimeStamp()
+							+ "Bought: " + productToBuy + " by " + myId + " through: " + newLeaderId);
 				}
 				else {
-					System.out.println(myId + " cannot buy " + productToBuy);
+					System.out.println( getCurrentTimeStamp()
+							+ myId + " cannot buy " + productToBuy);
 				}
 			
 			} catch (Exception e1) {
-				System.out.println("Error in Client Thread to fetch the leader");
+//				System.out.println("Error in Client Thread to fetch the leader");
 			}
 		}
 	}
 		
-	
+	class CacheRunnable implements Runnable{
+
+		@Override
+		public void run() {
+			
+			DBServer dbServer = null;
+			try{
+				dbServer = (DBServer) registry.lookup(dbCreds);
+				String latestContent = dbServer.readFromDB();
+				if(!latestContent.equals("")) {
+					storeMap = mapper.readValue(latestContent, new TypeReference<HashMap<String, Inventory>>(){});
+					
+				}
+			}catch (Exception e) {
+				System.out.println("Failed to Fetch DBServer");
+			}
+			
+			
+		
+		}
+	}
 		
 	private int selectItemAtRandom(int max) {
 		
